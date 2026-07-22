@@ -1,0 +1,21 @@
+_format_version: "3.0"
+_transform: true
+
+consumers:
+  - username: henosis-anon
+    keyauth_credentials:
+      - key: __SUPABASE_ANON_KEY__
+
+services:
+  - name: supabase-rest
+    url: http://supabase-rest:3000/
+    routes:
+      - name: supabase-rest-v1
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json",
+  "basins": [
+    {
+      "name": "henosis-core-dev",
+      "config": {
+        "create_stream_on_append": true
+      },
+      "streams": [
+        {
+          "name": "registry"
+        }
+      ]
+    },
+    {
+      "name": "henosis-core-test",
+      "config": {
+        "create_stream_on_append": true
+      },
+      "streams": [
+        {
+          "name": "registry"
+        }
+      ]
+    }
+  ]
+}

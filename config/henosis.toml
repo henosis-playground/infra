@@ -1,0 +1,48 @@
+deploy_repo = "henosis-playground/deploy"
+manifest_branch = "main"
+gate_command = "henosis-gate"
+gate_check_run_name = "Henosis merge gate"
+advisory_gate_check_run_name = "Henosis advisory merge gate"
+preview_mode = "on-demand"
+queue_tick_interval_secs = 15
+cmd_prefix = "@henosis-bot"
+dev_manifest_path = "worlds/dev.toml"
+
+[core_api]
+endpoint = "http://core:8080"
+presentation_endpoint = "https://henosis.skuld.systems"
+token = "core-dev-token"
+
+[[components]]
+name = "service-a"
+repo = "henosis-playground/service-a"
+main_branch = "main"
+mode = "gate-only"
+
+[[components]]
+name = "service-b"
+repo = "henosis-playground/service-b"
+main_branch = "main"
+mode = "gate-only"
+
+[[components]]
+name = "service-d"
+repo = "henosis-playground/service-d"
+main_branch = "main"
+mode = "gate-only"
+
+[[components]]
+name = "service-e"
+repo = "henosis-playground/service-e"
+main_branch = "main"
+mode = "gate-only"
+
+[[components]]
+name = "service-f"
+repo = "henosis-playground/service-f"
+main_branch = "main"
+mode = "gate-only"
+
+[[environments]]
+id = "dev"
+manifest_path = "worlds/dev.toml"

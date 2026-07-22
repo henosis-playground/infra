@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mounted over the image's baked henosis-gate. All version/toolchain/cache
+# decisions live in platform/scripts/prepare-runner.sh, shared with deploy CI.
+
+recipe="${HENOSIS_PREPARE_RUNNER:-/opt/henosis/prepare-runner.sh}"
+ref="${HENOSIS_PLATFORM_REF:-origin/main}"
+state_dir="${HENOSIS_RUNNER_STATE_DIR:-/var/lib/henosis-runner}"
+log_file="$state_dir/invocations.log"
+mkdir -p "$state_dir"
+
+entrypoint="$("$recipe" "$ref" 2> >(tee -a "$log_file" >&2))"
+platform_root="$(dirname -- "$entrypoint")"
+sha="$(cat "$platform_root/.henosis-platform-sha")"
+marker="$(tr -d '\r\n' < "$platform_root/RUNNER_MARKER" 2>/dev/null || printf '%s' unmarked)"
+
+output_dir=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--output" ]; then
+    output_dir="$arg"
+    break
+  fi
+  previous="$arg"
+done
+
+set +e
+"$entrypoint" gate "$@"
+status=$?
+set -e
+
+cells_evidence="absent"
+if [ -n "$output_dir" ] && [ -f "$output_dir/cells.json" ]; then
+  evidence_staging="$state_dir/.last-cells.$$"
+  cp "$output_dir/cells.json" "$evidence_staging"
+  mv "$evidence_staging" "$state_dir/last-cells.json"
+  cells_evidence="$state_dir/last-cells.json"
+fi
+
+printf 'Henosis runner invocation: timestamp=%s platform_sha=%s marker=%s exit=%s cells_json=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$sha" "$marker" "$status" "$cells_evidence" >> "$log_file"
+exit "$status"

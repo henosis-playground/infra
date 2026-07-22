@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+recipe="${HENOSIS_PREPARE_RUNNER:-/opt/henosis/prepare-runner.sh}"
+ref="${HENOSIS_PLATFORM_REF:-origin/main}"
+entrypoint="$("$recipe" "$ref")"
+exec "$entrypoint" inspect "$@"

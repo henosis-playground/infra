@@ -1,0 +1,426 @@
+services:
+  bot:
+    build:
+      context: ../repos/bot
+    networks: [henosis]
+    depends_on:
+      postgres:
+        condition: service_started
+      core:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://henosis:henosis@postgres:5432/henosis
+      CMD_PREFIX: "@henosis-bot"
+      COMMIT_AUTHOR_NAME: "henosis-bot[bot]"
+      COMMIT_AUTHOR_EMAIL: "301059251+henosis-bot[bot]@users.noreply.github.com"
+      AUTO_BUILD_CHECK_RUN_NAME: "Henosis repo validation"
+      TRY_BUILD_CHECK_RUN_NAME: "Henosis try build"
+      MERGE_COMMIT_MESSAGE_PREFIX: "Henosis merge of"
+      SERVICE_NAME: "Henosis"
+      PERMISSIONS: /data/permissions
+      HENOSIS_CONFIG: /config/henosis.toml
+      HENOSIS_WIDENED_GATE: "true"
+      HENOSIS_PLATFORM_CHECKOUT: /var/lib/henosis-runner/checkout
+      HENOSIS_RUNNER_CACHE_DIR: /var/lib/henosis-runner/cache
+      HENOSIS_RUNNER_STATE_DIR: /var/lib/henosis-runner
+      HENOSIS_GITHUB_TOKEN_FILE: /run/secrets/github-pat
+      HENOSIS_BUNDLE_ROOT: /var/lib/henosis-d26/bundles
+      HENOSIS_ARTIFACT_ROOT: /var/lib/henosis-d26/artifacts
+      PNPM_CONFIG_STRICT_STORE_PKG_CONTENT_CHECK: "false"
+      BORS_CONFIG_EXEMPT_REPOS: "henosis-playground/core,henosis-playground/connector-k8s,henosis-playground/platform"
+      WEB_URL: https://henosis.skuld.systems
+      RUST_LOG: bors=debug,sqlx=info
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./config:/config:ro
+      - ./permissions:/data/permissions:ro
+      - ./data/webhooks:/data/webhooks:ro
+      - ../repos/platform/scripts/prepare-runner.sh:/opt/henosis/prepare-runner.sh:ro
+      - ./scripts/henosis-gate:/usr/local/bin/henosis-gate:ro
+      - ./scripts/henosis-inspect:/usr/local/bin/henosis-inspect:ro
+      - ./data/platform-runner:/var/lib/henosis-runner
+      - d26_content:/var/lib/henosis-d26
+    secrets:
+      - source: github_pat
+        target: github-pat
+    entrypoint: ["/config/bot-entrypoint.sh"]
+    expose:
+      - "8080"
+    # DO NOT publish any host port for bot — host 8080 is occupied
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    networks: [henosis]
+    restart: unless-stopped
+    env_file: .env
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: henosis
+      POSTGRES_PASSWORD: henosis
+      POSTGRES_DB: henosis
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks: [henosis]
+
+  # Core graph lifecycle log. S2 is the store of record; local disk keeps the
+  # PoC durable across container restarts while retaining the S2-compatible API.
+  # Prototype reset: stop the stack and wipe the s2data volume/basin; there are
+  # deliberately no migrations or compatibility shims.
+  s2-lite:
+    image: ghcr.io/s2-streamstore/s2:0.39.1
+    command:
+      - lite
+      - --local-root=/home/nonroot/data
+      - --init-file=/etc/s2/init.json
+      - --no-cors
+    environment:
+      S2_ACCESS_TOKEN: local
+      S2_ACCOUNT_ENDPOINT: http://127.0.0.1:80
+      S2_BASIN_ENDPOINT: http://127.0.0.1:80
+    volumes:
+      - s2data:/home/nonroot
+      - ./config/s2-init.json:/etc/s2/init.json:ro
+    ports:
+      - "127.0.0.1:${S2_LITE_PORT:-4480}:80"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "./s2", "list-basins", "--limit", "1", "--no-auto-paginate"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Non-log-shaped core metadata only. Kept separate from the live bot's
+  # Postgres instance to isolate migrations, load, and operational failures.
+  core-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: henosis_core
+      POSTGRES_DB: henosis_core
+      POSTGRES_PASSWORD_FILE: /run/secrets/core_postgres_password
+    secrets:
+      - core_postgres_password
+    volumes:
+      - core_pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${CORE_POSTGRES_PORT:-5434}:5432"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Graph orchestrator. It is part of the live stack so ordinary Compose
+  # restarts preserve the core-backed preview path.
+  core:
+    build:
+      context: ../repos/core
+    environment:
+      HENOSIS_BIND: 0.0.0.0:8080
+      HENOSIS_BUNDLE_ROOT: /var/lib/henosis-d26/bundles
+      HENOSIS_DURABLE_BUNDLE_ROOT: /var/lib/henosis-d26/durable-bundles
+      HENOSIS_ARTIFACT_ROOT: /var/lib/henosis-d26/artifacts
+      HENOSIS_DEPLOY_REMOTE: https://github.com/henosis-playground/deploy.git
+      HENOSIS_GITHUB_TOKEN_FILE: /run/secrets/github-pat
+      HENOSIS_CLOUDFLARE_LIVE: "1"
+      CLOUDFLARE_ACCOUNT_ID: 965071931a613b921a22320036d244c8
+      HENOSIS_SUPABASE_LIVE: "1"
+      HENOSIS_SUPABASE_HOST: supabase-db
+      HENOSIS_SUPABASE_PORT: "5432"
+      HENOSIS_SUPABASE_USER: postgres
+      HENOSIS_SUPABASE_DATABASE: postgres
+      HENOSIS_SUPABASE_PASSWORD_FILE: /run/secrets/supabase-postgres-password
+      HENOSIS_SUPABASE_API_URL: http://127.0.0.1:${SUPABASE_API_PORT:-4484}
+      HENOSIS_SUPABASE_DATABASE_URL_REF: docker-secret://supabase-connection-url
+      HENOSIS_SUPABASE_ANON_KEY_REF: docker-secret://supabase-anon-key
+      CORE_POSTGRES_PASSWORD_FILE: /run/secrets/core_postgres_password
+      S2_ACCESS_TOKEN: local
+      S2_ACCOUNT_ENDPOINT: http://s2-lite:80
+      S2_BASIN_ENDPOINT: http://s2-lite:80
+      S2_BASIN: henosis-core-dev
+      RUST_LOG: henosis=info
+    depends_on:
+      s2-lite:
+        condition: service_healthy
+      core-postgres:
+        condition: service_healthy
+    secrets:
+      - core_postgres_password
+      - supabase-postgres-password
+      - source: github_pat
+        target: github-pat
+    volumes:
+      - d26_content:/var/lib/henosis-d26
+      - ${HOME}/.config/.wrangler:/root/.config/.wrangler
+    ports:
+      - "127.0.0.1:${CORE_PORT:-4481}:8080"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--output", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Superseded D25 process, retained behind an explicit recovery profile.
+  # The active D26 stack runs the Kubernetes controller inside core.
+  connector-k8s:
+    profiles: [legacy-connectors]
+    build:
+      context: ../repos/connector-k8s
+    environment:
+      HENOSIS_BIND: 0.0.0.0:8081
+      HENOSIS_CORE_URL: http://core:8080
+      HENOSIS_CORE_TOKEN: core-dev-token
+      HENOSIS_STATE_DIR: /var/lib/henosis-connector-k8s/state
+      HENOSIS_PREPARE_RUNNER: /opt/henosis/platform/scripts/prepare-runner.sh
+      HENOSIS_PLATFORM_REF: origin/main
+      HENOSIS_PLATFORM_CHECKOUT: /var/lib/henosis-connector-k8s/platform
+      HENOSIS_RUNNER_CACHE_DIR: /var/lib/henosis-connector-k8s/runner-cache
+      HENOSIS_DEPLOY_REMOTE: https://github.com/henosis-playground/deploy.git
+      HENOSIS_GITHUB_TOKEN_FILE: /run/secrets/github-pat
+      RUST_LOG: henosis=info
+    depends_on:
+      core:
+        condition: service_healthy
+    volumes:
+      - connector_k8s_data:/var/lib/henosis-connector-k8s
+      - ../repos/platform/scripts/prepare-runner.sh:/opt/henosis/platform/scripts/prepare-runner.sh:ro
+    secrets:
+      - source: github_pat
+        target: github-pat
+    ports:
+      - "127.0.0.1:${CONNECTOR_K8S_PORT:-4482}:8081"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8081/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Minimal official self-hosted Supabase target for the second connector. The
+  # phase-f profile is additive: ordinary live-stack Compose operations do not
+  # start or recreate these services.
+  supabase-db:
+    profiles: [phase-f]
+    image: supabase/postgres:17.6.1.136
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/supabase-postgres-password
+    secrets:
+      - supabase-postgres-password
+    volumes:
+      - supabase_db_data:/var/lib/postgresql/data
+      - ./supabase/bootstrap.sql:/docker-entrypoint-initdb.d/99-henosis-bootstrap.sql:ro
+      - ./supabase/configure.sql:/docker-entrypoint-initdb.d/migrations/99999999999999-henosis-local.sql:ro
+    ports:
+      - "127.0.0.1:${SUPABASE_POSTGRES_PORT:-4485}:5432"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  supabase-rest:
+    profiles: [phase-f]
+    build:
+      context: ./supabase
+      dockerfile: postgrest.Dockerfile
+    entrypoint: ["/bin/busybox", "sh", "/opt/henosis/postgrest-entrypoint.sh"]
+    environment:
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_ADMIN_SERVER_PORT: "3001"
+      PGRST_ADMIN_SERVER_HOST: 0.0.0.0
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    secrets:
+      - supabase-postgres-password
+      - supabase-jwt-secret
+    volumes:
+      - ./supabase/postgrest-entrypoint.sh:/opt/henosis/postgrest-entrypoint.sh:ro
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  supabase-kong:
+    profiles: [phase-f]
+    image: kong/kong:3.9.1
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/opt/henosis/kong-entrypoint.sh"]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_PLUGINS: bundled
+      KONG_PROXY_ACCESS_LOG: /dev/stdout combined
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout combined
+    depends_on:
+      supabase-rest:
+        condition: service_healthy
+    secrets:
+      - supabase-anon-key
+    volumes:
+      - ./supabase/kong.yml:/etc/kong/kong.template.yml:ro
+      - ./supabase/kong-entrypoint.sh:/opt/henosis/kong-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:${SUPABASE_API_PORT:-4484}:8000"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  # Level-triggered plan/apply reconciler. It shares only the existing S2
+  # basin; its connector-owned stream is an operation journal, not target state.
+  connector-supabase:
+    profiles: [phase-f]
+    build:
+      context: ../repos/connector-supabase
+    environment:
+      HENOSIS_BIND: 0.0.0.0:8082
+      HENOSIS_CORE_URL: http://core:8080
+      HENOSIS_CORE_TOKEN: core-dev-token
+      HENOSIS_STATE_DIR: /var/lib/henosis-connector-supabase/state
+      S2_ACCESS_TOKEN: local
+      S2_ACCOUNT_ENDPOINT: http://s2-lite:80
+      S2_BASIN_ENDPOINT: http://s2-lite:80
+      S2_BASIN: henosis-core-dev
+      HENOSIS_SUPABASE_JOURNAL_STREAM: connector-supabase-local-v1
+      HENOSIS_SUPABASE_HOST: supabase-db
+      HENOSIS_SUPABASE_PORT: "5432"
+      HENOSIS_SUPABASE_USER: postgres
+      HENOSIS_SUPABASE_DATABASE: postgres
+      HENOSIS_SUPABASE_PASSWORD_FILE: /run/secrets/supabase-postgres-password
+      HENOSIS_SUPABASE_API_URL: http://127.0.0.1:${SUPABASE_API_PORT:-4484}
+      HENOSIS_SUPABASE_DATABASE_URL_REF: docker-secret://supabase-connection-url
+      HENOSIS_SUPABASE_ANON_KEY_REF: docker-secret://supabase-anon-key
+      RUST_LOG: henosis=info
+    depends_on:
+      core:
+        condition: service_healthy
+      s2-lite:
+        condition: service_healthy
+      supabase-db:
+        condition: service_healthy
+      supabase-kong:
+        condition: service_healthy
+    secrets:
+      - supabase-postgres-password
+    volumes:
+      - connector_supabase_data:/var/lib/henosis-connector-supabase
+    ports:
+      - "127.0.0.1:${CONNECTOR_SUPABASE_PORT:-4486}:8082"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8082/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Cloudflare Workers reconciler. The phase-g profile is additive and can be
+  # started without recreating the existing stack.
+  connector-cloudflare:
+    profiles: [phase-g]
+    build:
+      context: ../repos/connector-cloudflare
+    environment:
+      HENOSIS_BIND: 0.0.0.0:8083
+      HENOSIS_CORE_URL: http://core:8080
+      HENOSIS_CORE_TOKEN: core-dev-token
+      HENOSIS_STATE_DIR: /var/lib/henosis-connector-cloudflare/state
+      HENOSIS_SECRET_ROOT: /run/secrets
+      HENOSIS_WRANGLER_CONFIG_SOURCE: /run/host-wrangler/default.toml
+      XDG_CONFIG_HOME: /var/lib/henosis-connector-cloudflare/xdg
+      CLOUDFLARE_ACCOUNT_ID: 965071931a613b921a22320036d244c8
+      CLOUDFLARE_API_TOKEN: ""
+      CLOUDFLARE_ACCOUNT_SUBDOMAIN: ivann-mike
+      RUST_LOG: henosis=info
+    depends_on:
+      core:
+        condition: service_healthy
+    secrets:
+      - supabase-anon-key
+    volumes:
+      - connector_cloudflare_data:/var/lib/henosis-connector-cloudflare
+      - supabase_private_tunnel:/var/lib/henosis-tunnel
+      - ${HOME}/.config/.wrangler/config/default.toml:/run/host-wrangler/default.toml:ro
+    ports:
+      - "127.0.0.1:${CONNECTOR_CLOUDFLARE_PORT:-4487}:8083"
+    networks: [henosis]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8083/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Separate remotely managed Tunnel for Workers VPC access to local PostgREST.
+  # The connector creates the provider resource and writes its scoped token into
+  # the shared volume; this service never receives the Cloudflare API token.
+  supabase-private-tunnel:
+    profiles: [phase-g]
+    image: cloudflare/cloudflared:latest
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token-file
+      - /var/lib/henosis-tunnel/token
+    volumes:
+      - supabase_private_tunnel:/var/lib/henosis-tunnel:ro
+    networks: [henosis]
+    restart: unless-stopped
+
+networks:
+  henosis:
+
+volumes:
+  pgdata:
+  s2data:
+  core_pgdata:
+  d26_content:
+  connector_k8s_data:
+  connector_supabase_data:
+  connector_cloudflare_data:
+  supabase_private_tunnel:
+  supabase_db_data:
+
+secrets:
+  core_postgres_password:
+    file: ./secrets/core-postgres-password.txt
+  github_pat:
+    file: ./secrets/github-pat.txt
+  supabase-postgres-password:
+    file: ./secrets/supabase-postgres-password.txt
+  supabase-jwt-secret:
+    file: ./secrets/supabase-jwt-secret.txt
+  supabase-anon-key:
+    file: ./secrets/supabase-anon-key.txt
