@@ -72,7 +72,7 @@ services:
   # Prototype reset: stop the stack and wipe the s2data volume/basin; there are
   # deliberately no migrations or compatibility shims.
   s2-lite:
-    image: ghcr.io/s2-streamstore/s2:0.39.1
+    image: ghcr.io/s2-streamstore/s2:0.39.2
     command:
       - lite
       - --local-root=/home/nonroot/data
