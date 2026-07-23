@@ -4,7 +4,10 @@
     {
       "name": "henosis-core-dev",
       "config": {
-        "create_stream_on_append": true
+        "create_stream_on_append": true,
+        "default_stream_config": {
+          "retention_policy": "infinite"
+        }
       },
       "streams": [
         {
@@ -15,7 +18,10 @@
     {
       "name": "henosis-core-test",
       "config": {
-        "create_stream_on_append": true
+        "create_stream_on_append": true,
+        "default_stream_config": {
+          "retention_policy": "infinite"
+        }
       },
       "streams": [
         {
